@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import AsyncExitStack
 from typing import Any, AsyncIterator, Optional
@@ -179,26 +180,117 @@ class AgentService:
             return []
 
     async def get_history(self, session_id: str) -> list[dict[str, Any]]:
-        """Return the stored conversation for ``session_id`` from Neo4j memory.
+        """Return the stored conversation for ``session_id`` from Neo4j memory,
+        fully reconstructed with tool calls and tool results in order.
 
-        Each item is ``{"role": "user"|"assistant"|..., "content": "..."}``,
-        ordered oldest → newest.
+        Messages are fetched directly from the memory Neo4j (Conversation ->
+        Message). Consecutive assistant/tool messages are grouped into a
+        single assistant turn whose ``items`` list interleaves text blocks,
+        tool calls and tool results in the order the agent produced them.
+
+        Returned shape::
+
+            [
+              {"role": "user",      "items": [{"type": "text", "text": ...}]},
+              {"role": "assistant", "items": [
+                  {"type": "tool_call",   "name": ..., "args": {...}},
+                  {"type": "tool_result", "name": ..., "output": ...},
+                  {"type": "text",        "text": ...},
+              ]},
+              ...
+            ]
         """
-        memory = await self._get_memory(session_id)
-        chat_messages = await memory.aget_all()
-        history: list[dict[str, Any]] = []
-        for m in chat_messages:
-            role = getattr(m, "role", "user")
-            role_str = getattr(role, "value", None) or str(role)
-            content = getattr(m, "content", None)
-            if content is None:
-                # Newer llama-index ChatMessage uses block-based content
-                blocks = getattr(m, "blocks", None) or []
-                content = "".join(
-                    getattr(b, "text", "") for b in blocks if getattr(b, "text", None)
+        if self._memory_driver is None:
+            return []
+
+        cypher = """
+        MATCH (c:Conversation {session_id: $sid})-[:HAS_MESSAGE]->(m:Message)
+        RETURN m.role AS role,
+               m.content AS content,
+               m.metadata AS metadata,
+               m.timestamp AS ts
+        ORDER BY m.timestamp
+        """
+        raw: list[dict[str, Any]] = []
+        try:
+            async with self._memory_driver.session(
+                database=settings.memory_neo4j_database
+            ) as session:
+                result = await session.run(cypher, sid=session_id)
+                async for record in result:
+                    raw.append(
+                        {
+                            "role": record["role"],
+                            "content": record["content"] or "",
+                            "metadata": record["metadata"],
+                        }
+                    )
+        except Exception as exc:
+            logger.warning("get_history failed: %s", exc)
+            return []
+
+        # tool_call_id -> tool_name, so tool-result messages can be labelled
+        tool_call_names: dict[str, str] = {}
+        messages: list[dict[str, Any]] = []
+        current_assistant: Optional[dict[str, Any]] = None
+
+        def _meta(raw_meta: Any) -> dict[str, Any]:
+            if not raw_meta:
+                return {}
+            if isinstance(raw_meta, dict):
+                return raw_meta
+            try:
+                return json.loads(raw_meta)
+            except Exception:
+                return {}
+
+        def _ensure_assistant() -> dict[str, Any]:
+            nonlocal current_assistant
+            if current_assistant is None:
+                current_assistant = {"role": "assistant", "items": []}
+                messages.append(current_assistant)
+            return current_assistant
+
+        for row in raw:
+            role = row["role"]
+            content = row["content"]
+            meta = _meta(row["metadata"])
+
+            if role == "user":
+                current_assistant = None  # start a new assistant turn after this
+                messages.append(
+                    {"role": "user", "items": [{"type": "text", "text": content}]}
                 )
-            history.append({"role": role_str, "content": content or ""})
-        return history
+
+            elif role == "assistant":
+                turn = _ensure_assistant()
+                tool_calls = meta.get("tool_calls") or []
+                if tool_calls:
+                    for tc in tool_calls:
+                        fn = tc.get("function") or {}
+                        name = fn.get("name", "tool")
+                        args_raw = fn.get("arguments")
+                        try:
+                            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+                        except Exception:
+                            args = {"_raw": args_raw}
+                        turn["items"].append(
+                            {"type": "tool_call", "name": name, "args": args}
+                        )
+                        if tc.get("id"):
+                            tool_call_names[tc["id"]] = name
+                if content:
+                    turn["items"].append({"type": "text", "text": content})
+
+            elif role == "tool":
+                turn = _ensure_assistant()
+                name = tool_call_names.get(meta.get("tool_call_id", ""), "tool")
+                turn["items"].append(
+                    {"type": "tool_result", "name": name, "output": content}
+                )
+            # silently ignore system/other roles
+
+        return messages
 
     async def stream_chat(
         self, session_id: str, user_msg: str

@@ -28,25 +28,18 @@ def _fetch_remote_sessions() -> list[dict[str, Any]]:
 
 
 def _load_history_from_backend(session_id: str) -> list[dict[str, Any]]:
-    """Fetch this session's conversation history from Neo4j via the backend."""
+    """Fetch this session's conversation history from Neo4j via the backend.
+
+    The backend already returns messages in the {role, items:[...]} shape the
+    UI renders natively, with tool calls and results interleaved in the right
+    order.
+    """
     try:
         r = requests.get(
             f"{BACKEND_URL}/sessions/{session_id}/history", timeout=10
         )
         r.raise_for_status()
-        data = r.json()
-        messages = []
-        for m in data.get("messages", []):
-            role = m.get("role", "user")
-            if role not in ("user", "assistant", "system", "tool"):
-                role = "assistant" if "assistant" in role.lower() else "user"
-            messages.append(
-                {
-                    "role": role,
-                    "items": [{"type": "text", "text": m.get("content", "")}],
-                }
-            )
-        return messages
+        return r.json().get("messages", [])
     except Exception as exc:
         st.warning(f"Could not load history for {session_id}: {exc}")
         return []
