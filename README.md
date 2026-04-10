@@ -26,24 +26,7 @@ A FastAPI + Streamlit app that wraps a LlamaIndex `FunctionAgent` with:
 - Python 3.10+
 - An OpenAI API key
 
-## 2. Start the local memory Neo4j
-
-```bash
-docker compose up -d
-```
-
-Neo4j Browser: http://localhost:7474 — login `neo4j` / `password`.
-Bolt: `bolt://localhost:7687`.
-
-## 3. Install Python deps
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-## 4. Configure environment
+## 2. Configure environment
 
 ```bash
 cp .env.example .env
@@ -52,13 +35,26 @@ cp .env.example .env
 
 By default:
 - Retrieval points at `neo4j+s://demo.neo4jlabs.com:7687` (database `companies2`).
-- Memory points at the local docker Neo4j on `bolt://localhost:7687`.
+- Memory points at the dockerized Neo4j (`bolt://neo4j-memory:7687` from
+  inside the compose network, `bolt://localhost:7687` from your host).
 
-## 5. Run the backend
+## 3. Run everything with Docker Compose
 
 ```bash
-uvicorn backend.main:app --reload --port 8000
+docker compose up -d --build
 ```
+
+This starts three services:
+- **neo4j-memory** — latest Neo4j image with APOC, ports `7474`/`7687`
+  (`neo4j` / `password`) — used for agent memory.
+- **backend** — FastAPI + LlamaIndex agent on `http://localhost:8000`.
+  Spawns `neo4j-mcp-server` as a stdio child process on startup.
+- **frontend** — Streamlit UI on `http://localhost:8501`, pointed at
+  the backend service via `BACKEND_URL=http://backend:8000`.
+
+Open the UI at **http://localhost:8501**.
+
+### Backend details
 
 The backend:
 1. Launches `neo4j-mcp-server` as a stdio child process (read-only) pointed
@@ -73,13 +69,14 @@ Endpoints:
 - `POST /chat` → `{session_id, message}` → `{response, events}`
 - `POST /chat/stream` → SSE stream of `delta` / `tool_call` / `tool_result` / `final`
 
-## 6. Run the Streamlit frontend
-
-In a second terminal:
+### Running locally without Docker (optional)
 
 ```bash
-source .venv/bin/activate
-streamlit run frontend/app.py
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+docker compose up -d neo4j-memory                # only the memory Neo4j
+uvicorn backend.main:app --reload --port 8000    # backend
+streamlit run frontend/app.py                    # frontend (another terminal)
 ```
 
 Open http://localhost:8501. Each Streamlit session gets its own `session_id`

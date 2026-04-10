@@ -1,17 +1,16 @@
 services:
   neo4j-memory:
-    image: neo4j:5.26-enterprise
+    image: neo4j:latest
     container_name: neo4j-agent-memory
     ports:
       - "7474:7474"   # HTTP
       - "7687:7687"   # Bolt
     environment:
       NEO4J_AUTH: neo4j/password
-      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
-      NEO4J_dbms_memory_heap_initial__size: "1G"
-      NEO4J_dbms_memory_heap_max__size: "2G"
+      NEO4J_server_memory_heap_initial__size: "1G"
+      NEO4J_server_memory_heap_max__size: "2G"
     volumes:
       - neo4j_memory_data:/data
       - neo4j_memory_logs:/logs
@@ -20,6 +19,37 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: neo4j-agent-backend
+    env_file:
+      - .env
+    environment:
+      # Override memory URI so it targets the compose service, not localhost
+      MEMORY_NEO4J_URI: bolt://neo4j-memory:7687
+      MEMORY_NEO4J_USERNAME: neo4j
+      MEMORY_NEO4J_PASSWORD: password
+      MEMORY_NEO4J_DATABASE: neo4j
+    ports:
+      - "8000:8000"
+    depends_on:
+      neo4j-memory:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: neo4j-agent-frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
 
 volumes:
   neo4j_memory_data:
