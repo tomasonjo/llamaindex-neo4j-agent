@@ -85,8 +85,6 @@ change the ID or click "New session" to start fresh.
 
 ## Notes
 
-- The original notebook script this project is based on lives at
-  `llamaindexneo4jmcp.py`.
 - The agent's system prompt instructs it to always call `get-schema` before
   running Cypher. You can tweak it in `backend/agent.py`.
 - To target a different retrieval Neo4j, set `RETRIEVAL_NEO4J_*` in `.env`.
