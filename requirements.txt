@@ -11,7 +11,9 @@ llama-index-tools-mcp>=0.1.0
 llama-index-embeddings-openai>=0.3.0
 
 neo4j-mcp-server
-neo4j-agent-memory[llamaindex]
+# Install from fork with the ChatMessage-metadata fix for the LlamaIndex
+# integration. TODO: switch back to PyPI once the fix lands upstream.
+neo4j-agent-memory[llamaindex] @ git+https://github.com/tomasonjo/agent-memory.git@main
 
 streamlit>=1.38.0
 requests>=2.32.0
