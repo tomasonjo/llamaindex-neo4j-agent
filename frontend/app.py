@@ -16,20 +16,15 @@ st.set_page_config(page_title="Neo4j Agent", page_icon="🔎", layout="wide")
 
 # ---------------------------------------------------------------- session state
 
-if "sessions" not in st.session_state:
-    # {session_id: {"name": str, "messages": [...], "loaded": bool}}
-    first = f"session-{uuid.uuid4().hex[:8]}"
-    st.session_state.sessions = {
-        first: {"name": first, "messages": [], "loaded": True}
-    }
-    st.session_state.active_session = first
-
-
-def _new_session() -> str:
-    sid = f"session-{uuid.uuid4().hex[:8]}"
-    st.session_state.sessions[sid] = {"name": sid, "messages": [], "loaded": True}
-    st.session_state.active_session = sid
-    return sid
+def _fetch_remote_sessions() -> list[dict[str, Any]]:
+    """Fetch all sessions known to the backend (Neo4j memory)."""
+    try:
+        r = requests.get(f"{BACKEND_URL}/sessions", timeout=10)
+        r.raise_for_status()
+        return r.json().get("sessions", [])
+    except Exception as exc:
+        st.warning(f"Could not list sessions: {exc}")
+        return []
 
 
 def _load_history_from_backend(session_id: str) -> list[dict[str, Any]]:
@@ -43,7 +38,6 @@ def _load_history_from_backend(session_id: str) -> list[dict[str, Any]]:
         messages = []
         for m in data.get("messages", []):
             role = m.get("role", "user")
-            # normalize role values — neo4j-agent-memory may return MessageRole enums
             if role not in ("user", "assistant", "system", "tool"):
                 role = "assistant" if "assistant" in role.lower() else "user"
             messages.append(
@@ -58,23 +52,32 @@ def _load_history_from_backend(session_id: str) -> list[dict[str, Any]]:
         return []
 
 
+if "sessions" not in st.session_state:
+    # {session_id: {"messages": [...], "loaded": bool}}
+    st.session_state.sessions = {}
+    # Seed from whatever the backend already has in Neo4j.
+    for row in _fetch_remote_sessions():
+        sid = row["session_id"]
+        st.session_state.sessions[sid] = {"messages": [], "loaded": False}
+    if not st.session_state.sessions:
+        sid = f"session-{uuid.uuid4().hex[:8]}"
+        st.session_state.sessions[sid] = {"messages": [], "loaded": True}
+    st.session_state.active_session = next(iter(st.session_state.sessions))
+
+
+def _new_session() -> str:
+    sid = f"session-{uuid.uuid4().hex[:8]}"
+    st.session_state.sessions[sid] = {"messages": [], "loaded": True}
+    st.session_state.active_session = sid
+    return sid
+
+
 def _ensure_loaded(session_id: str) -> None:
     """Load the session's history from Neo4j once on first access."""
     sess = st.session_state.sessions[session_id]
     if not sess.get("loaded"):
         sess["messages"] = _load_history_from_backend(session_id)
         sess["loaded"] = True
-
-
-def _add_existing_session(session_id: str) -> None:
-    """Register a session id the user typed in and lazy-load it from Neo4j."""
-    if session_id and session_id not in st.session_state.sessions:
-        st.session_state.sessions[session_id] = {
-            "name": session_id,
-            "messages": [],
-            "loaded": False,
-        }
-    st.session_state.active_session = session_id
 
 
 # ---------------------------------------------------------------- sidebar
@@ -86,35 +89,17 @@ with st.sidebar:
         _new_session()
         st.rerun()
 
-    with st.expander("🔎 Load existing session"):
-        existing_id = st.text_input(
-            "Session id",
-            key="load_existing_id",
-            placeholder="session-xxxxxxxx",
-        )
-        if st.button("Load", use_container_width=True) and existing_id.strip():
-            _add_existing_session(existing_id.strip())
-            st.rerun()
-
     st.divider()
 
-    for sid, data in list(st.session_state.sessions.items()):
+    for sid in list(st.session_state.sessions.keys()):
         is_active = sid == st.session_state.active_session
-        cols = st.columns([5, 1])
-        if cols[0].button(
-            f"{'▶ ' if is_active else '  '}{data['name']}",
+        if st.button(
+            f"{'▶ ' if is_active else '  '}{sid}",
             key=f"sel-{sid}",
             use_container_width=True,
             type="primary" if is_active else "secondary",
         ):
             st.session_state.active_session = sid
-            st.rerun()
-        if cols[1].button("🗑", key=f"del-{sid}", help="Delete session"):
-            del st.session_state.sessions[sid]
-            if not st.session_state.sessions:
-                _new_session()
-            elif st.session_state.active_session == sid:
-                st.session_state.active_session = next(iter(st.session_state.sessions))
             st.rerun()
 
     st.divider()

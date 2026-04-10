@@ -20,6 +20,7 @@ from llama_index.core.agent.workflow import (
 from llama_index.llms.openai import OpenAI
 from llama_index.tools.mcp import BasicMCPClient, McpToolSpec
 
+from neo4j import AsyncGraphDatabase
 from neo4j_agent_memory import MemoryClient, MemorySettings
 from neo4j_agent_memory.integrations.llamaindex import Neo4jLlamaIndexMemory
 
@@ -39,6 +40,7 @@ class AgentService:
     def __init__(self) -> None:
         self._exit_stack = AsyncExitStack()
         self._memory_client: Optional[MemoryClient] = None
+        self._memory_driver = None
         self._mcp_client: Optional[BasicMCPClient] = None
         self._tools: list = []
         self._llm: Optional[OpenAI] = None
@@ -81,7 +83,15 @@ class AgentService:
         )
         logger.info("Memory client connected to %s", settings.memory_neo4j_uri)
 
+        # Direct driver used only for listing existing sessions (read-only).
+        self._memory_driver = AsyncGraphDatabase.driver(
+            settings.memory_neo4j_uri,
+            auth=(settings.memory_neo4j_username, settings.memory_neo4j_password),
+        )
+
     async def shutdown(self) -> None:
+        if self._memory_driver is not None:
+            await self._memory_driver.close()
         await self._exit_stack.aclose()
 
     # ---------------------------------------------------------------- internal
@@ -127,6 +137,46 @@ class AgentService:
 
         response = await handler
         return {"response": str(response), "events": events}
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        """Return all known sessions stored in the memory Neo4j.
+
+        neo4j-agent-memory writes ``(:Conversation {session_id, created_at,
+        updated_at})`` nodes. We aggregate by ``session_id`` (multiple
+        conversations can share one) and return them newest first.
+        """
+        if self._memory_driver is None:
+            return []
+        cypher = """
+        MATCH (c:Conversation)
+        WHERE c.session_id IS NOT NULL
+        RETURN c.session_id AS session_id,
+               max(c.updated_at) AS updated_at,
+               min(c.created_at) AS created_at
+        ORDER BY updated_at DESC
+        """
+        try:
+            async with self._memory_driver.session(
+                database=settings.memory_neo4j_database
+            ) as session:
+                result = await session.run(cypher)
+                rows = []
+                async for record in result:
+                    rows.append(
+                        {
+                            "session_id": record["session_id"],
+                            "updated_at": str(record["updated_at"])
+                            if record["updated_at"] is not None
+                            else None,
+                            "created_at": str(record["created_at"])
+                            if record["created_at"] is not None
+                            else None,
+                        }
+                    )
+            return rows
+        except Exception as exc:
+            logger.warning("list_sessions failed: %s", exc)
+            return []
 
     async def get_history(self, session_id: str) -> list[dict[str, Any]]:
         """Return the stored conversation for ``session_id`` from Neo4j memory.

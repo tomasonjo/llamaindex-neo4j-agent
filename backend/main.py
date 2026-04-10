@@ -47,6 +47,15 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/sessions")
+async def list_sessions() -> dict:
+    try:
+        return {"sessions": await agent_service.list_sessions()}
+    except Exception as exc:  # pragma: no cover
+        logger.exception("list sessions failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/sessions/{session_id}/history")
 async def session_history(session_id: str) -> dict:
     try:
