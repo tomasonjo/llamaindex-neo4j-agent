@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from typing import Any
 
 import requests
 import streamlit as st
@@ -12,22 +13,56 @@ import streamlit as st
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 st.set_page_config(page_title="Neo4j Agent", page_icon="🔎", layout="wide")
-st.title("🔎 LlamaIndex Neo4j Agent")
-st.caption("Retrieval: remote Neo4j via MCP · Memory: local Neo4j")
+
+# ---------------------------------------------------------------- session state
+
+if "sessions" not in st.session_state:
+    # {session_id: {"name": str, "messages": [ {role, items:[...]}, ... ]}}
+    first = f"session-{uuid.uuid4().hex[:8]}"
+    st.session_state.sessions = {first: {"name": first, "messages": []}}
+    st.session_state.active_session = first
+
+
+def _new_session() -> str:
+    sid = f"session-{uuid.uuid4().hex[:8]}"
+    st.session_state.sessions[sid] = {"name": sid, "messages": []}
+    st.session_state.active_session = sid
+    return sid
+
+
+# ---------------------------------------------------------------- sidebar
 
 with st.sidebar:
-    st.subheader("Session")
-    if "session_id" not in st.session_state:
-        st.session_state.session_id = f"session-{uuid.uuid4().hex[:8]}"
-    st.session_state.session_id = st.text_input(
-        "Session ID", value=st.session_state.session_id
-    )
-    if st.button("🆕 New session"):
-        st.session_state.session_id = f"session-{uuid.uuid4().hex[:8]}"
-        st.session_state.messages = []
+    st.title("💬 Sessions")
+
+    if st.button("➕ New session", use_container_width=True):
+        _new_session()
         st.rerun()
 
     st.divider()
+
+    for sid, data in list(st.session_state.sessions.items()):
+        is_active = sid == st.session_state.active_session
+        cols = st.columns([5, 1])
+        if cols[0].button(
+            f"{'▶ ' if is_active else '  '}{data['name']}",
+            key=f"sel-{sid}",
+            use_container_width=True,
+            type="primary" if is_active else "secondary",
+        ):
+            st.session_state.active_session = sid
+            st.rerun()
+        if cols[1].button("🗑", key=f"del-{sid}", help="Delete session"):
+            del st.session_state.sessions[sid]
+            if not st.session_state.sessions:
+                _new_session()
+            elif st.session_state.active_session == sid:
+                st.session_state.active_session = next(iter(st.session_state.sessions))
+            st.rerun()
+
+    st.divider()
+    st.caption("Active session ID")
+    st.code(st.session_state.active_session, language=None)
     stream = st.toggle("Stream responses", value=True)
     st.caption(f"Backend: `{BACKEND_URL}`")
     try:
@@ -39,35 +74,56 @@ with st.sidebar:
     except Exception as exc:
         st.error(f"Backend unreachable: {exc}")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
 
-for msg in st.session_state.messages:
+# ---------------------------------------------------------------- main
+
+st.title("🔎 LlamaIndex Neo4j Agent")
+st.caption("Retrieval: remote Neo4j via MCP · Memory: local Neo4j")
+
+active = st.session_state.sessions[st.session_state.active_session]
+messages: list[dict[str, Any]] = active["messages"]
+
+
+def _render_item(item: dict[str, Any]) -> None:
+    """Render a single ordered message item (text or tool call/result)."""
+    kind = item["type"]
+    if kind == "text":
+        st.markdown(item["text"])
+    elif kind == "tool_call":
+        with st.expander(f"🔧 {item['name']}"):
+            st.json(item.get("args", {}))
+    elif kind == "tool_result":
+        with st.expander(f"📦 result: {item['name']}"):
+            st.code(item.get("output", ""))
+
+
+# --- render history in order ---
+for msg in messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        for ev in msg.get("events", []):
-            if ev["type"] == "tool_call":
-                with st.expander(f"🔧 {ev['name']}"):
-                    st.json(ev.get("args", {}))
-            elif ev["type"] == "tool_result":
-                with st.expander(f"📦 result: {ev['name']}"):
-                    st.code(ev.get("output", ""))
+        for item in msg["items"]:
+            _render_item(item)
 
+
+# --- chat input ---
 prompt = st.chat_input("Ask something about the graph…")
 
 if prompt:
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    messages.append({"role": "user", "items": [{"type": "text", "text": prompt}]})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    payload = {"session_id": st.session_state.session_id, "message": prompt}
+    payload = {
+        "session_id": st.session_state.active_session,
+        "message": prompt,
+    }
+
+    assistant_items: list[dict[str, Any]] = []
 
     with st.chat_message("assistant"):
         if stream:
-            placeholder = st.empty()
-            events_box = st.container()
-            full_text = ""
-            events: list[dict] = []
+            current_text = ""
+            current_text_slot: Any = None  # active st.empty() placeholder or None
+
             try:
                 with requests.post(
                     f"{BACKEND_URL}/chat/stream",
@@ -84,49 +140,80 @@ if prompt:
                             continue
                         event = json.loads(line[6:])
                         t = event.get("type")
+
                         if t == "delta":
-                            full_text += event["text"]
-                            placeholder.markdown(full_text + "▌")
+                            if current_text_slot is None:
+                                current_text = ""
+                                current_text_slot = st.empty()
+                            current_text += event["text"]
+                            current_text_slot.markdown(current_text + "▌")
+
                         elif t == "final":
-                            full_text = event["text"] or full_text
-                            placeholder.markdown(full_text)
+                            final_text = event.get("text") or current_text
+                            if current_text_slot is None:
+                                st.markdown(final_text)
+                            else:
+                                current_text_slot.markdown(final_text)
+                                current_text_slot = None
+                            if final_text:
+                                assistant_items.append(
+                                    {"type": "text", "text": final_text}
+                                )
+                            current_text = ""
+
                         elif t in ("tool_call", "tool_result"):
-                            events.append(event)
-                            with events_box:
-                                if t == "tool_call":
-                                    with st.expander(f"🔧 {event['name']}"):
-                                        st.json(event.get("args", {}))
-                                else:
-                                    with st.expander(f"📦 result: {event['name']}"):
-                                        st.code(event.get("output", ""))
+                            # seal any pending text block first so ordering is preserved
+                            if current_text_slot is not None:
+                                current_text_slot.markdown(current_text)
+                                if current_text:
+                                    assistant_items.append(
+                                        {"type": "text", "text": current_text}
+                                    )
+                                current_text_slot = None
+                                current_text = ""
+                            item = {
+                                "type": t,
+                                "name": event["name"],
+                                **(
+                                    {"args": event.get("args", {})}
+                                    if t == "tool_call"
+                                    else {"output": event.get("output", "")}
+                                ),
+                            }
+                            _render_item(item)
+                            assistant_items.append(item)
+
                         elif t == "error":
                             st.error(event.get("message", "unknown error"))
-                placeholder.markdown(full_text)
+
+                # if the stream ended with an unfinalized partial text
+                if current_text_slot is not None and current_text:
+                    current_text_slot.markdown(current_text)
+                    assistant_items.append({"type": "text", "text": current_text})
             except Exception as exc:
                 st.error(f"Request failed: {exc}")
-                full_text = ""
-            st.session_state.messages.append(
-                {"role": "assistant", "content": full_text, "events": events}
-            )
+
         else:
             try:
                 r = requests.post(f"{BACKEND_URL}/chat", json=payload, timeout=300)
                 r.raise_for_status()
                 data = r.json()
-                st.markdown(data["response"])
+                # Non-streaming: events are in order; render them then the response text.
                 for ev in data.get("events", []):
-                    if ev["type"] == "tool_call":
-                        with st.expander(f"🔧 {ev['name']}"):
-                            st.json(ev.get("args", {}))
-                    else:
-                        with st.expander(f"📦 result: {ev['name']}"):
-                            st.code(ev.get("output", ""))
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": data["response"],
-                        "events": data.get("events", []),
+                    item = {
+                        "type": ev["type"],
+                        "name": ev["name"],
+                        **(
+                            {"args": ev.get("args", {})}
+                            if ev["type"] == "tool_call"
+                            else {"output": ev.get("output", "")}
+                        ),
                     }
-                )
+                    _render_item(item)
+                    assistant_items.append(item)
+                st.markdown(data["response"])
+                assistant_items.append({"type": "text", "text": data["response"]})
             except Exception as exc:
                 st.error(f"Request failed: {exc}")
+
+    messages.append({"role": "assistant", "items": assistant_items})
