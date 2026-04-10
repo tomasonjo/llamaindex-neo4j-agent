@@ -28,7 +28,17 @@ services:
     env_file:
       - .env
     environment:
-      # Override memory URI so it targets the compose service, not localhost
+      # --- OpenAI ---
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+
+      # --- Retrieval Neo4j (remote, exposed to the agent via neo4j-mcp-server) ---
+      RETRIEVAL_NEO4J_URI: ${RETRIEVAL_NEO4J_URI:-neo4j+s://demo.neo4jlabs.com:7687}
+      RETRIEVAL_NEO4J_DATABASE: ${RETRIEVAL_NEO4J_DATABASE:-companies2}
+      RETRIEVAL_NEO4J_USERNAME: ${RETRIEVAL_NEO4J_USERNAME:-companies2}
+      RETRIEVAL_NEO4J_PASSWORD: ${RETRIEVAL_NEO4J_PASSWORD:-companies2}
+
+      # --- Memory Neo4j (local, this compose file) ---
       MEMORY_NEO4J_URI: bolt://neo4j-memory:7687
       MEMORY_NEO4J_USERNAME: neo4j
       MEMORY_NEO4J_PASSWORD: password
