@@ -47,6 +47,16 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/sessions/{session_id}/history")
+async def session_history(session_id: str) -> dict:
+    try:
+        messages = await agent_service.get_history(session_id)
+        return {"session_id": session_id, "messages": messages}
+    except Exception as exc:  # pragma: no cover
+        logger.exception("history fetch failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest) -> dict:
     try:

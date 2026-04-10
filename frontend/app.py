@@ -17,17 +17,64 @@ st.set_page_config(page_title="Neo4j Agent", page_icon="🔎", layout="wide")
 # ---------------------------------------------------------------- session state
 
 if "sessions" not in st.session_state:
-    # {session_id: {"name": str, "messages": [ {role, items:[...]}, ... ]}}
+    # {session_id: {"name": str, "messages": [...], "loaded": bool}}
     first = f"session-{uuid.uuid4().hex[:8]}"
-    st.session_state.sessions = {first: {"name": first, "messages": []}}
+    st.session_state.sessions = {
+        first: {"name": first, "messages": [], "loaded": True}
+    }
     st.session_state.active_session = first
 
 
 def _new_session() -> str:
     sid = f"session-{uuid.uuid4().hex[:8]}"
-    st.session_state.sessions[sid] = {"name": sid, "messages": []}
+    st.session_state.sessions[sid] = {"name": sid, "messages": [], "loaded": True}
     st.session_state.active_session = sid
     return sid
+
+
+def _load_history_from_backend(session_id: str) -> list[dict[str, Any]]:
+    """Fetch this session's conversation history from Neo4j via the backend."""
+    try:
+        r = requests.get(
+            f"{BACKEND_URL}/sessions/{session_id}/history", timeout=10
+        )
+        r.raise_for_status()
+        data = r.json()
+        messages = []
+        for m in data.get("messages", []):
+            role = m.get("role", "user")
+            # normalize role values — neo4j-agent-memory may return MessageRole enums
+            if role not in ("user", "assistant", "system", "tool"):
+                role = "assistant" if "assistant" in role.lower() else "user"
+            messages.append(
+                {
+                    "role": role,
+                    "items": [{"type": "text", "text": m.get("content", "")}],
+                }
+            )
+        return messages
+    except Exception as exc:
+        st.warning(f"Could not load history for {session_id}: {exc}")
+        return []
+
+
+def _ensure_loaded(session_id: str) -> None:
+    """Load the session's history from Neo4j once on first access."""
+    sess = st.session_state.sessions[session_id]
+    if not sess.get("loaded"):
+        sess["messages"] = _load_history_from_backend(session_id)
+        sess["loaded"] = True
+
+
+def _add_existing_session(session_id: str) -> None:
+    """Register a session id the user typed in and lazy-load it from Neo4j."""
+    if session_id and session_id not in st.session_state.sessions:
+        st.session_state.sessions[session_id] = {
+            "name": session_id,
+            "messages": [],
+            "loaded": False,
+        }
+    st.session_state.active_session = session_id
 
 
 # ---------------------------------------------------------------- sidebar
@@ -38,6 +85,16 @@ with st.sidebar:
     if st.button("➕ New session", use_container_width=True):
         _new_session()
         st.rerun()
+
+    with st.expander("🔎 Load existing session"):
+        existing_id = st.text_input(
+            "Session id",
+            key="load_existing_id",
+            placeholder="session-xxxxxxxx",
+        )
+        if st.button("Load", use_container_width=True) and existing_id.strip():
+            _add_existing_session(existing_id.strip())
+            st.rerun()
 
     st.divider()
 
@@ -80,6 +137,7 @@ with st.sidebar:
 st.title("🔎 LlamaIndex Neo4j Agent")
 st.caption("Retrieval: remote Neo4j via MCP · Memory: local Neo4j")
 
+_ensure_loaded(st.session_state.active_session)
 active = st.session_state.sessions[st.session_state.active_session]
 messages: list[dict[str, Any]] = active["messages"]
 

@@ -128,6 +128,28 @@ class AgentService:
         response = await handler
         return {"response": str(response), "events": events}
 
+    async def get_history(self, session_id: str) -> list[dict[str, Any]]:
+        """Return the stored conversation for ``session_id`` from Neo4j memory.
+
+        Each item is ``{"role": "user"|"assistant"|..., "content": "..."}``,
+        ordered oldest → newest.
+        """
+        memory = await self._get_memory(session_id)
+        chat_messages = await memory.aget_all()
+        history: list[dict[str, Any]] = []
+        for m in chat_messages:
+            role = getattr(m, "role", "user")
+            role_str = getattr(role, "value", None) or str(role)
+            content = getattr(m, "content", None)
+            if content is None:
+                # Newer llama-index ChatMessage uses block-based content
+                blocks = getattr(m, "blocks", None) or []
+                content = "".join(
+                    getattr(b, "text", "") for b in blocks if getattr(b, "text", None)
+                )
+            history.append({"role": role_str, "content": content or ""})
+        return history
+
     async def stream_chat(
         self, session_id: str, user_msg: str
     ) -> AsyncIterator[dict[str, Any]]:
